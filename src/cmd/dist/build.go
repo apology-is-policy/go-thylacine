@@ -101,6 +101,7 @@ var okgoos = []string{
 	"netbsd",
 	"openbsd",
 	"plan9",
+	"thylacine",
 	"windows",
 	"aix",
 }
@@ -1816,6 +1817,7 @@ var cgoEnabled = map[string]bool{
 	"plan9/386":       false,
 	"plan9/amd64":     false,
 	"plan9/arm":       false,
+	"thylacine/arm64": false,
 	"solaris/amd64":   true,
 	"windows/386":     true,
 	"windows/amd64":   true,
