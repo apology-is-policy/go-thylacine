@@ -209,7 +209,14 @@ const (
 	// to a 48-bit address space like every other arm64 platform.
 	//
 	// WebAssembly currently has a limit of 4GB linear memory.
-	heapAddrBits = (_64bit*(1-goarch.IsWasm)*(1-goos.IsIos*goarch.IsArm64))*48 + (1-_64bit+goarch.IsWasm)*(32-(goarch.IsMips+goarch.IsMipsle)) + 40*goos.IsIos*goarch.IsArm64
+	// thylacine/arm64 uses the same constrained heapAddrBits as ios/arm64 (40,
+	// a 1 TiB heap window) because its anonymous mappings come from
+	// SYS_BURROW_ATTACH, which eager-commits: the page-summary RESERVATION must
+	// fit a bounded window (48-bit would reserve ~512 MiB, far over
+	// BURROW_ATTACH_MAX). The kernel hands out VAs first-fit from 4 GiB
+	// (EXEC_USER_BURROW_BASE = 2^32), and the eager-commit physical ceiling
+	// keeps live mappings far below 2^40. See runtime/mem_thylacine.go.
+	heapAddrBits = (_64bit*(1-goarch.IsWasm)*(1-(goos.IsIos+goos.IsThylacine)*goarch.IsArm64))*48 + (1-_64bit+goarch.IsWasm)*(32-(goarch.IsMips+goarch.IsMipsle)) + 40*(goos.IsIos+goos.IsThylacine)*goarch.IsArm64
 
 	// maxAlloc is the maximum size of an allocation. On 64-bit,
 	// it's theoretically possible to allocate 1<<heapAddrBits bytes. On
@@ -252,7 +259,9 @@ const (
 	// logHeapArenaBytes is log_2 of heapArenaBytes. For clarity,
 	// prefer using heapArenaBytes where possible (we need the
 	// constant to compute some other constants).
-	logHeapArenaBytes = (6+20)*(_64bit*(1-goos.IsWindows)*(1-goarch.IsWasm)*(1-goos.IsIos*goarch.IsArm64)) + (2+20)*(_64bit*goos.IsWindows) + (2+20)*(1-_64bit) + (2+20)*goarch.IsWasm + (2+20)*goos.IsIos*goarch.IsArm64
+	// thylacine/arm64 mirrors ios/arm64: 4 MiB arenas (2+20) so each eager
+	// SYS_BURROW_ATTACH commits only 4 MiB, not 64 MiB.
+	logHeapArenaBytes = (6+20)*(_64bit*(1-goos.IsWindows)*(1-goarch.IsWasm)*(1-(goos.IsIos+goos.IsThylacine)*goarch.IsArm64)) + (2+20)*(_64bit*goos.IsWindows) + (2+20)*(1-_64bit) + (2+20)*goarch.IsWasm + (2+20)*(goos.IsIos+goos.IsThylacine)*goarch.IsArm64
 
 	// heapArenaBitmapWords is the size of each heap arena's bitmap in uintptrs.
 	heapArenaBitmapWords = heapArenaWords / (8 * goarch.PtrSize)
