@@ -6,10 +6,17 @@
 
 package syscall
 
+import (
+	"internal/itoa"
+	"runtime"
+	"unsafe"
+)
+
 // Process spawning, Thylacine. Like Plan 9, there is no Unix fork: a child is
-// created fully-formed by SYS_SPAWN_FULL_ARGV (name + argv + inherited fds).
-// The real StartProcess / WaitProcess land in Stage 3b; here are the types the
-// os package needs plus the v1.0 stubs.
+// created fully-formed by SYS_SPAWN_FULL_ARGV (name + argv + inherited fds),
+// and reaped by SYS_WAIT_PID. Both ride the entersyscall-wrapped Syscall
+// primitive -- a blocking SYS_WAIT_PID must leave the goroutine in _Gsyscall
+// so a concurrent GC stop-the-world is not wedged on the un-preemptible SVC.
 
 // SysProcAttr holds optional, OS-specific attributes for StartProcess. There
 // is no fork-time child setup on Thylacine beyond the inherited fd list, so it
@@ -41,10 +48,6 @@ func (w Waitmsg) ExitStatus() int {
 	return w.Status
 }
 
-// StartProcess and WaitProcess are filled in at Stage 3b (SYS_SPAWN_FULL_ARGV
-// and SYS_WAIT_PID respectively). Stage 3a only needs them to exist so the os
-// package compiles.
-
 func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle uintptr, err error) {
 	return startProcess(argv0, argv, attr)
 }
@@ -53,10 +56,128 @@ func WaitProcess(pid int, w *Waitmsg) error {
 	return waitProcess(pid, w)
 }
 
+// The SYS_SPAWN_FULL_ARGV bound constants (spawnNameMax / spawnArgvMax /
+// spawnArgvDataMax / spawnMaxFds) live in const_thylacine.go.
+
+// spawnArgs mirrors struct sys_spawn_args (the 96-byte SYS_SPAWN_FULL_ARGV
+// record). Every u64 lands on an 8-byte boundary, so Go's natural struct
+// layout matches the kernel's byte-for-byte (verified against the kernel's
+// _Static_assert offset pins). The trailing identity (56..80) and allowance
+// (80..96) blocks are left zero -- the child inherits the parent's identity
+// and broad allowance, exactly as every C caller that zero-fills the struct.
+type spawnArgs struct {
+	nameVa         uint64 // 0
+	argvDataVa     uint64 // 8
+	fdListVa       uint64 // 16
+	nameLen        uint32 // 24
+	argvDataLen    uint32 // 28
+	argc           uint32 // 32
+	fdCount        uint32 // 36
+	permFlags      uint32 // 40
+	padEnvp        uint32 // 44
+	capMask        uint64 // 48
+	principalID    uint32 // 56
+	primaryGid     uint32 // 60
+	suppGidsVa     uint64 // 64
+	suppGidCount   uint32 // 72
+	identityFlags  uint32 // 76
+	allowanceVa    uint64 // 80
+	allowanceFlags uint32 // 88
+	padAllow       uint32 // 92
+}
+
 func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle uintptr, err error) {
-	return 0, 0, ENOSYS
+	if len(argv0) == 0 || len(argv0) > spawnNameMax {
+		return 0, 0, EINVAL
+	}
+	// v1.0: SYS_SPAWN_FULL_ARGV carries no working-directory argument -- the
+	// child inherits the parent's cwd. A caller-set ProcAttr.Dir cannot be
+	// honored, so fail closed rather than silently run in the wrong directory.
+	// Env is silently dropped: Thylacine native processes have no environment
+	// (G15), and os/exec always populates Env, so erroring on it is wrong.
+	if attr != nil && attr.Dir != "" {
+		return 0, 0, ENOSYS
+	}
+
+	// argv buffer: each entry NUL-terminated; argc = entry count. The kernel
+	// delivers argv = [argv0, args...] verbatim (argv[0] is included in the
+	// buffer). os.StartProcess already puts the program name at argv[0]; if a
+	// caller passed an empty argv, synthesize argv[0] = argv0.
+	var argvBuf []byte
+	argc := 0
+	if len(argv) == 0 {
+		argvBuf = append(argvBuf, argv0...)
+		argvBuf = append(argvBuf, 0)
+		argc = 1
+	} else {
+		for _, a := range argv {
+			argvBuf = append(argvBuf, a...)
+			argvBuf = append(argvBuf, 0)
+			argc++
+		}
+	}
+	if argc > spawnArgvMax {
+		return 0, 0, EINVAL
+	}
+	if len(argvBuf) > spawnArgvDataMax {
+		return 0, 0, EINVAL
+	}
+
+	// fd_list: the child receives these handles at slots 0..n-1
+	// (Files[0]=stdin, Files[1]=stdout, Files[2]=stderr, then any extras).
+	var fds []uint32
+	if attr != nil {
+		fds = make([]uint32, 0, len(attr.Files))
+		for _, f := range attr.Files {
+			fds = append(fds, uint32(f))
+		}
+	}
+	if len(fds) > spawnMaxFds {
+		return 0, 0, EINVAL
+	}
+
+	name := []byte(argv0)
+	var fdListVa uint64
+	if len(fds) > 0 {
+		fdListVa = uint64(uintptr(unsafe.Pointer(&fds[0])))
+	}
+	rec := spawnArgs{
+		nameVa:      uint64(uintptr(unsafe.Pointer(&name[0]))),
+		argvDataVa:  uint64(uintptr(unsafe.Pointer(&argvBuf[0]))),
+		fdListVa:    fdListVa,
+		nameLen:     uint32(len(name)),
+		argvDataLen: uint32(len(argvBuf)),
+		argc:        uint32(argc),
+		fdCount:     uint32(len(fds)),
+	}
+	r1, _, e := Syscall(SYS_SPAWN_FULL_ARGV, uintptr(unsafe.Pointer(&rec)), 0, 0)
+	// The kernel copies name/argv_data/fd_list before returning; keep the
+	// backing buffers alive across the SVC.
+	runtime.KeepAlive(name)
+	runtime.KeepAlive(argvBuf)
+	runtime.KeepAlive(fds)
+	if e != 0 {
+		return 0, 0, e
+	}
+	return int(r1), 0, nil
 }
 
 func waitProcess(pid int, w *Waitmsg) error {
-	return ENOSYS
+	// want_pid = pid (>0 selects that child), flags = 0 (block), status_out =
+	// &status. The kernel writes the child's exit_status to *status_out and
+	// returns the reaped pid. SYS_WAIT_PID blocks, so Syscall's entersyscall
+	// wrap is load-bearing here.
+	var status int32
+	r1, _, e := Syscall(SYS_WAIT_PID, uintptr(pid), 0, uintptr(unsafe.Pointer(&status)))
+	if e != 0 {
+		return e
+	}
+	if w != nil {
+		w.Pid = int(r1)
+		w.Status = int(status)
+		if status != 0 {
+			w.Msg = "exit status " + itoa.Itoa(int(status))
+		}
+	}
+	return nil
 }

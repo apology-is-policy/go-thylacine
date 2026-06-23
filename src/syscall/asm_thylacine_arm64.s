@@ -11,16 +11,25 @@
 // return value in R0. An error is a negative value in [-4095, -1] (the
 // newer syscalls return a real -errno; the legacy file syscalls return a
 // generic -1, which surfaces here as EPERM -- see #102). The errno-decode
-// is the standard `CMN $4095, R0` / `BCC` pattern.
+// is the standard `CMN $4095, R0` / `BCC` pattern: CMN computes R0 + 4095
+// and sets the carry flag iff R0 is in [-4095, -1] (the error band), so
+// BCC (carry clear) branches to the success label.
 //
-// These primitives do NOT call runtime.entersyscall: at Stage 3a the only
-// callers are file ops whose blocking is bounded, and sysmon retakes the P
-// for any pathological stall. The net layer (Stage 3c) adds the
-// entersyscall-wrapped blocking path it needs.
+// Syscall / Syscall6 are entersyscall-wrapped, like every BSD/Darwin arm64
+// port: a Thylacine syscall can block (a 9P file read to stratumd, a
+// SYS_WAIT_PID, a blocking pipe read), so the goroutine MUST be in
+// _Gsyscall across the SVC -- else a concurrent GC stop-the-world spins
+// forever on the un-preemptible SVC instruction. The frame is $0: the
+// arm64 assembler auto-saves LR for a non-leaf NOSPLIT function, so the
+// `BL runtime.entersyscall` does not clobber the return address.
+//
+// RawSyscall / RawSyscall6 are NOT wrapped -- they are the non-blocking,
+// scheduler-transparent primitives (the runtime convention).
 //
 
 // func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
 TEXT ·Syscall(SB),NOSPLIT,$0-56
+	BL	runtime·entersyscall<ABIInternal>(SB)
 	MOVD	a1+8(FP), R0
 	MOVD	a2+16(FP), R1
 	MOVD	a3+24(FP), R2
@@ -36,15 +45,18 @@ TEXT ·Syscall(SB),NOSPLIT,$0-56
 	MOVD	ZR, r2+40(FP)
 	NEG	R0, R0
 	MOVD	R0, err+48(FP)
+	BL	runtime·exitsyscall<ABIInternal>(SB)
 	RET
 oksc3:
 	MOVD	R0, r1+32(FP)
 	MOVD	R1, r2+40(FP)
 	MOVD	ZR, err+48(FP)
+	BL	runtime·exitsyscall<ABIInternal>(SB)
 	RET
 
 // func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
 TEXT ·Syscall6(SB),NOSPLIT,$0-80
+	BL	runtime·entersyscall<ABIInternal>(SB)
 	MOVD	a1+8(FP), R0
 	MOVD	a2+16(FP), R1
 	MOVD	a3+24(FP), R2
@@ -60,11 +72,13 @@ TEXT ·Syscall6(SB),NOSPLIT,$0-80
 	MOVD	ZR, r2+64(FP)
 	NEG	R0, R0
 	MOVD	R0, err+72(FP)
+	BL	runtime·exitsyscall<ABIInternal>(SB)
 	RET
 oksc6:
 	MOVD	R0, r1+56(FP)
 	MOVD	R1, r2+64(FP)
 	MOVD	ZR, err+72(FP)
+	BL	runtime·exitsyscall<ABIInternal>(SB)
 	RET
 
 // func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2, err uintptr)
