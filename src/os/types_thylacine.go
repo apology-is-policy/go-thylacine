@@ -1,8 +1,8 @@
-// Copyright 2009 The Go Authors. All rights reserved.
+// Copyright 2026 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !windows && !plan9 && !thylacine
+//go:build thylacine
 
 package os
 
@@ -26,5 +26,7 @@ func (fs *fileStat) ModTime() time.Time { return fs.modTime }
 func (fs *fileStat) Sys() any           { return &fs.sys }
 
 func sameFile(fs1, fs2 *fileStat) bool {
-	return fs1.sys.Dev == fs2.sys.Dev && fs1.sys.Ino == fs2.sys.Ino
+	// Thylacine carries no Dev id in t_stat; the 9P qid (path+type) is the
+	// per-Dev identity. Cross-Dev collisions are possible but rare at v1.0.
+	return fs1.sys.QidPath == fs2.sys.QidPath && fs1.sys.QidType == fs2.sys.QidType
 }
