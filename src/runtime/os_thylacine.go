@@ -200,9 +200,70 @@ func getPageSize() uintptr {
 	return physPageSize
 }
 
+//go:noescape
+func readdirRaw(fd int32, p unsafe.Pointer, n int32) int32
+
+// goenvs reads the per-Proc environment from the /env device (ARCH 9.7 / G15)
+// into envs, the initial backing for os.Environ. The Plan 9 model: the
+// environment is a directory of files (one /env/NAME per variable). We list
+// /env via SYS_READDIR -- a plain read on the directory returns -1, so readdir
+// is its enumeration path -- and read each /env/NAME value. Subsequent
+// os.Setenv/Getenv operate on this cache without writing back (POSIX semantics),
+// exactly as on plan9. Structurally this is the plan9 goenvs with the directory
+// parse adapted to Thylacine's 9P2000.L Treaddir dirents (vs plan9's legacy
+// stat-format read).
 func goenvs() {
-	// The kernel passes no environment at this stage.
-	envs = make([]string, 0)
+	envs = make([]string, 0, 16)
+
+	dirpath := [...]byte{'/', 'e', 'n', 'v'}
+	dirfd := openReadRoot(unsafe.Pointer(&dirpath[0]), int32(len(dirpath)))
+	if dirfd < 0 {
+		return // no /env mount (an early/unmounted Proc) -> empty environment
+	}
+
+	dbuf := new([4096]byte)       // a run of 9P2000.L dirents
+	vbuf := new([4096]byte)       // a variable's value (<= ENV_VALUE_MAX)
+	namebuf := make([]byte, 256)  // "/env/" + NAME, for the per-variable open
+	copy(namebuf, "/env/")
+
+	for {
+		dn := readdirRaw(dirfd, unsafe.Pointer(&dbuf[0]), int32(len(dbuf)))
+		if dn <= 0 {
+			break
+		}
+		b := dbuf[:dn]
+		// Each dirent: qid(13) + offset/cookie(8) + type(1) + namelen(2 LE) +
+		// name(namelen). The kernel emits only whole entries per readdir call.
+		for len(b) >= 24 {
+			nlen := int(b[22]) | int(b[23])<<8
+			if nlen <= 0 || 24+nlen > len(b) {
+				break
+			}
+			name := b[24 : 24+nlen]
+			if 5+nlen <= len(namebuf) {
+				copy(namebuf[5:], name)
+				fd := openReadRoot(unsafe.Pointer(&namebuf[0]), int32(5+nlen))
+				if fd >= 0 {
+					total := 0
+					for total < len(vbuf) {
+						r := read(fd, unsafe.Pointer(&vbuf[total]), int32(len(vbuf)-total))
+						if r <= 0 {
+							break
+						}
+						total += int(r)
+					}
+					closefd(fd)
+					env := make([]byte, nlen+1+total)
+					copy(env, name)
+					env[nlen] = '='
+					copy(env[nlen+1:], vbuf[:total])
+					envs = append(envs, string(env))
+				}
+			}
+			b = b[24+nlen:]
+		}
+	}
+	closefd(dirfd)
 }
 
 func readRandom(r []byte) int {

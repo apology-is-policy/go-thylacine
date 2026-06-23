@@ -105,6 +105,20 @@ TEXT runtime·openReadRoot(SB),NOSPLIT|NOFRAME,$0-20
 	MOVW	R0, ret+16(FP)
 	RET
 
+// readdirRaw(fd, buf, n) -> SYS_READDIR (56). Reads the next run of 9P2000.L
+// dirents into buf; returns the byte count, or 0 at end-of-directory. The fd's
+// offset (the resume cookie) advances in the kernel across calls, so repeated
+// calls drain the directory. Used by goenvs to enumerate /env (a directory; a
+// plain read on it returns -1, so readdir is the enumeration path).
+TEXT runtime·readdirRaw(SB),NOSPLIT|NOFRAME,$0-28
+	MOVW	fd+0(FP), R0
+	MOVD	p+8(FP), R1
+	MOVW	n+16(FP), R2
+	MOVD	$56, R8			// SYS_READDIR
+	SVC
+	MOVW	R0, ret+24(FP)
+	RET
+
 // func clock_gettime(clockid int32, ts *timespec)
 // The timespec is allocated by the Go caller (walltime / nanotime1); this is
 // a pure register shuffle, so there is no stack-frame layout hazard here.
