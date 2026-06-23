@@ -26,8 +26,9 @@
 #define SYS_close		11
 #define SYS_getrandom		20
 #define SYS_set_tid_address	36
-#define SYS_burrow_attach	37
 #define SYS_burrow_detach	38
+#define SYS_burrow_attach_lazy	83
+#define SYS_burrow_decommit	84
 #define SYS_torpor_wait		39
 #define SYS_torpor_wake		40
 #define SYS_thread_spawn	41
@@ -131,12 +132,13 @@ TEXT runtime·getrandom(SB),NOSPLIT|NOFRAME,$0-28
 	MOVW	R0, ret+24(FP)
 	RET
 
-// func sysBurrowAttach(n uintptr) uintptr
-// Returns the kernel-chosen base VA on success (a small positive VA), or a
-// negative errno on failure. EAGER commit -- the pages are backed at create.
-TEXT runtime·sysBurrowAttach(SB),NOSPLIT|NOFRAME,$0-16
+// func sysBurrowAttachLazy(n uintptr) uintptr
+// Reserve [ret, ret+n) as anonymous, demand-zero, RW memory: no physical
+// pages until first touch (the Linux overcommit contract). Returns the
+// kernel-chosen base VA on success (a small positive VA), or a negative errno.
+TEXT runtime·sysBurrowAttachLazy(SB),NOSPLIT|NOFRAME,$0-16
 	MOVD	n+0(FP), R0
-	MOVD	$SYS_burrow_attach, R8
+	MOVD	$SYS_burrow_attach_lazy, R8
 	SVC
 	MOVD	R0, ret+8(FP)
 	RET
@@ -146,6 +148,18 @@ TEXT runtime·sysBurrowDetach(SB),NOSPLIT|NOFRAME,$0-20
 	MOVD	v+0(FP), R0
 	MOVD	n+8(FP), R1
 	MOVD	$SYS_burrow_detach, R8
+	SVC
+	MOVW	R0, ret+16(FP)
+	RET
+
+// func sysBurrowDecommit(v unsafe.Pointer, n uintptr) int32
+// Drop the resident pages of [v, v+n) (a madvise(DONTNEED) analog): clear the
+// PTEs and free the pages; the reservation stays and a later touch re-faults a
+// fresh zero page. Returns 0 on success, or a negative errno.
+TEXT runtime·sysBurrowDecommit(SB),NOSPLIT|NOFRAME,$0-20
+	MOVD	v+0(FP), R0
+	MOVD	n+8(FP), R1
+	MOVD	$SYS_burrow_decommit, R8
 	SVC
 	MOVW	R0, ret+16(FP)
 	RET
