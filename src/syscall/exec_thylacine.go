@@ -23,6 +23,16 @@ import (
 // is empty at v1.0.
 type SysProcAttr struct{}
 
+// Exec is the Unix execve(2) -- replace the running image in place. Thylacine
+// is spawn-only (SYS_SPAWN_FULL_ARGV creates a fresh child; there is no
+// exec-in-place), so Exec is unsupported and returns ENOSYS. It exists for
+// source compatibility: cmd/link's execArchive (external linking) references
+// it, but a pure-Go CGO_ENABLED=0 build always links internally, so the path is
+// never taken at runtime.
+func Exec(argv0 string, argv []string, envv []string) (err error) {
+	return ENOSYS
+}
+
 // ProcAttr holds attributes that will be applied to a new process started by
 // StartProcess.
 type ProcAttr struct {
