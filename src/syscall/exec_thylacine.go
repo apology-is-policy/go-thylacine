@@ -9,8 +9,23 @@ package syscall
 import (
 	"internal/itoa"
 	"runtime"
+	"sync"
 	"unsafe"
 )
+
+// spawnDirMu serializes the chdir-spawn-restore dance in startProcess that
+// honors ProcAttr.Dir. SYS_SPAWN_FULL_ARGV has no working-directory argument:
+// the child inherits the parent's cwd (the territory_clone deep-copies dot_path
+// at rfork). So a caller-set Dir is applied by chdir'ing the PARENT to Dir,
+// spawning -- the child captures cwd=Dir at clone -- then restoring the parent's
+// cwd. The mutex keeps concurrent StartProcess calls (cmd/go runs the
+// compile/asm/link tools with Dir=$WORK, in parallel) from racing the per-Proc
+// cwd. The serialized window is only getwd+chdir+spawn+chdir; the child's actual
+// run is NOT serialized (the spawn syscall returns once the child exists), so
+// build parallelism is preserved. This is the entry-point-spawn analog of
+// Plan 9's chdir-in-the-rfork-child (thylacine's child is already the new image,
+// so the chdir must happen in the parent across an atomic spawn window).
+var spawnDirMu sync.Mutex
 
 // Process spawning, Thylacine. Like Plan 9, there is no Unix fork: a child is
 // created fully-formed by SYS_SPAWN_FULL_ARGV (name + argv + inherited fds),
@@ -100,14 +115,11 @@ func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	if len(argv0) == 0 || len(argv0) > spawnNameMax {
 		return 0, 0, EINVAL
 	}
-	// v1.0: SYS_SPAWN_FULL_ARGV carries no working-directory argument -- the
-	// child inherits the parent's cwd. A caller-set ProcAttr.Dir cannot be
-	// honored, so fail closed rather than silently run in the wrong directory.
-	// Env is silently dropped: Thylacine native processes have no environment
-	// (G15), and os/exec always populates Env, so erroring on it is wrong.
-	if attr != nil && attr.Dir != "" {
-		return 0, 0, ENOSYS
-	}
+	// Env is silently dropped: Thylacine native processes inherit the parent's
+	// /env (G15), and os/exec always populates ProcAttr.Env, so erroring on it
+	// is wrong. ProcAttr.Dir is honored below (chdir-spawn-restore around the
+	// SYS_SPAWN_FULL_ARGV call); cmd/go runs the compile/asm/link tools with
+	// Dir=$WORK, so dropping it would build in the wrong directory.
 
 	// argv buffer: each entry NUL-terminated; argc = entry count. The kernel
 	// delivers argv = [argv0, args...] verbatim (argv[0] is included in the
@@ -159,6 +171,22 @@ func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 		argvDataLen: uint32(len(argvBuf)),
 		argc:        uint32(argc),
 		fdCount:     uint32(len(fds)),
+	}
+	// Honor ProcAttr.Dir: chdir the parent to Dir so the spawned child inherits
+	// cwd=Dir, then restore. Serialized by spawnDirMu so concurrent spawns do
+	// not race the per-Proc cwd; the deferred restore + unlock run at function
+	// return, just after the spawn syscall has captured the child's cwd.
+	if attr != nil && attr.Dir != "" {
+		spawnDirMu.Lock()
+		defer spawnDirMu.Unlock()
+		saved, gerr := Getwd()
+		if gerr != nil {
+			return 0, 0, gerr
+		}
+		if cerr := Chdir(attr.Dir); cerr != nil {
+			return 0, 0, cerr
+		}
+		defer Chdir(saved)
 	}
 	r1, _, e := Syscall(SYS_SPAWN_FULL_ARGV, uintptr(unsafe.Pointer(&rec)), 0, 0)
 	// The kernel copies name/argv_data/fd_list before returning; keep the

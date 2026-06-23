@@ -75,8 +75,8 @@ const DMDIR = 0x80000000
 
 // SYS_SPAWN_FULL_ARGV bounds (kernel/include/thylacine/syscall.h).
 const (
-	spawnNameMax     = 64
-	spawnArgvMax     = 16
-	spawnArgvDataMax = 4096
+	spawnNameMax     = 256
+	spawnArgvMax     = 512
+	spawnArgvDataMax = 65536
 	spawnMaxFds      = 16
 )
