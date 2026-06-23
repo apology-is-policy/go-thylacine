@@ -91,6 +91,20 @@ TEXT runtime·getpid(SB),NOSPLIT|NOFRAME,$0-8
 	MOVD	R0, ret+0(FP)
 	RET
 
+// func openReadRoot(path unsafe.Pointer, n int32) int32
+// SYS_OPEN(SYS_WALK_OPEN_FROM_ROOT, path, n, OREAD): open an existing path
+// for reading, resolved from the Territory root. Returns the fd, or a
+// negative value on error. Used by getCPUCount to read /ctl/sched at osinit.
+TEXT runtime·openReadRoot(SB),NOSPLIT|NOFRAME,$0-20
+	MOVD	$-1, R0			// SYS_WALK_OPEN_FROM_ROOT
+	MOVD	path+0(FP), R1
+	MOVW	n+8(FP), R2
+	MOVD	$0, R3			// OREAD
+	MOVD	$65, R8			// SYS_OPEN
+	SVC
+	MOVW	R0, ret+16(FP)
+	RET
+
 // func clock_gettime(clockid int32, ts *timespec)
 // The timespec is allocated by the Go caller (walltime / nanotime1); this is
 // a pure register shuffle, so there is no stack-frame layout hazard here.

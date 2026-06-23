@@ -144,8 +144,54 @@ func osinit() {
 	numCPUStartup = getCPUCount()
 }
 
+//go:noescape
+func openReadRoot(path unsafe.Pointer, n int32) int32
+
+// getCPUCount reads the online CPU count from /ctl/sched, which emits a
+// "cpus: N" line (the Plan 9 /dev/sysstat shape). Allocation-free, so it is
+// safe at osinit regardless of allocator-init order, and fail-soft: any error
+// (no /ctl mount, short read, no "cpus:" line) yields 1.
 func getCPUCount() int32 {
-	// Stage 1: a single P. A real CPU count (from /proc or /ctl) lands later.
+	path := [...]byte{'/', 'c', 't', 'l', '/', 's', 'c', 'h', 'e', 'd'}
+	fd := openReadRoot(unsafe.Pointer(&path[0]), int32(len(path)))
+	if fd < 0 {
+		return 1
+	}
+	var buf [512]byte
+	total := 0
+	for total < len(buf) {
+		n := read(int32(fd), unsafe.Pointer(&buf[total]), int32(len(buf)-total))
+		if n <= 0 {
+			break
+		}
+		total += int(n)
+	}
+	closefd(int32(fd))
+	return parseCpusLine(buf[:total])
+}
+
+// parseCpusLine scans b for "cpus: N" and returns N (>= 1), without
+// allocating. Returns 1 if the key or a valid number is absent.
+func parseCpusLine(b []byte) int32 {
+	for i := 0; i+5 <= len(b); i++ {
+		if b[i] == 'c' && b[i+1] == 'p' && b[i+2] == 'u' && b[i+3] == 's' && b[i+4] == ':' {
+			j := i + 5
+			for j < len(b) && b[j] == ' ' {
+				j++
+			}
+			n := int32(0)
+			got := false
+			for j < len(b) && b[j] >= '0' && b[j] <= '9' {
+				n = n*10 + int32(b[j]-'0')
+				j++
+				got = true
+			}
+			if got && n >= 1 {
+				return n
+			}
+			return 1
+		}
+	}
 	return 1
 }
 
