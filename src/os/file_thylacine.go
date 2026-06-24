@@ -79,7 +79,6 @@ func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 		e      error
 		create bool
 		excl   bool
-		trunc  bool
 		appnd  bool
 	)
 
@@ -90,25 +89,37 @@ func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 	if flag&O_EXCL == O_EXCL {
 		excl = true
 	}
-	if flag&O_TRUNC == O_TRUNC {
-		trunc = true
-	}
+	// O_TRUNC is NOT stripped from flag: the kernel open folds it into the
+	// omode word (omodeMask includes OTRUNC), so syscall.Open truncates an
+	// existing file -- which is how the open-or-create path below honors
+	// os.Create's truncate semantics without a separate ftruncate.
 	// O_APPEND is emulated (seek to end after open).
 	if flag&O_APPEND == O_APPEND {
 		flag = flag &^ O_APPEND
 		appnd = true
 	}
 
-	if (create && trunc) || excl {
+	if excl {
+		// O_CREATE|O_EXCL: must create a fresh file; an existing one is an error.
 		fd, e = syscall.Create(name, flag, syscallMode(perm))
-	} else {
+	} else if create {
+		// O_CREATE without O_EXCL = POSIX open-or-create. Thylacine's
+		// SYS_WALK_CREATE is bare-create (Tlcreate -> EEXIST on an existing
+		// path), so trying to create an existing file fails; open it instead.
+		// `flag` still carries O_TRUNC when requested, and the kernel open
+		// honors it (dev9p_open maps OTRUNC -> Tlopen O_TRUNC), so an existing
+		// file is truncated -- matching os.Create's contract. Create only when
+		// the path does not yet exist. (The go-build compile re-creates
+		// $WORK/*/go_asm.h, which is why this path is load-bearing.)
 		fd, e = syscall.Open(name, flag)
-		if IsNotExist(e) && create {
+		if IsNotExist(e) {
 			fd, e = syscall.Create(name, flag, syscallMode(perm))
 			if e != nil {
 				return nil, &PathError{Op: "create", Path: name, Err: e}
 			}
 		}
+	} else {
+		fd, e = syscall.Open(name, flag)
 	}
 
 	if e != nil {
@@ -239,7 +250,22 @@ func (f *File) write(b []byte) (n int, err error) {
 		return 0, err
 	}
 	defer f.writeUnlock()
-	return fixCount(syscall.Write(f.sysfd, b))
+	// syscall.Write caps each call at SYS_RW_MAX and returns a partial count;
+	// os.File.Write requires write() to consume all of b or report an error,
+	// so loop until done -- the role internal/poll.FD.Write plays for regular
+	// files on the other GOOSes. Without this loop a buffered writer over a
+	// large object surfaces io.ErrShortWrite from bufio.Writer.Flush.
+	for n < len(b) {
+		m, e := fixCount(syscall.Write(f.sysfd, b[n:]))
+		n += m
+		if e != nil {
+			return n, e
+		}
+		if m == 0 {
+			return n, io.ErrUnexpectedEOF
+		}
+	}
+	return n, nil
 }
 
 func (f *File) pwrite(b []byte, off int64) (n int, err error) {
@@ -247,7 +273,18 @@ func (f *File) pwrite(b []byte, off int64) (n int, err error) {
 		return 0, err
 	}
 	defer f.writeUnlock()
-	return fixCount(syscall.Pwrite(f.sysfd, b, off))
+	// Same SYS_RW_MAX-capped partial-write loop as write(), positioned.
+	for n < len(b) {
+		m, e := fixCount(syscall.Pwrite(f.sysfd, b[n:], off+int64(n)))
+		n += m
+		if e != nil {
+			return n, e
+		}
+		if m == 0 {
+			return n, io.ErrUnexpectedEOF
+		}
+	}
+	return n, nil
 }
 
 func (f *File) seek(offset int64, whence int) (ret int64, err error) {
