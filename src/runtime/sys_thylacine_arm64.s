@@ -7,8 +7,9 @@
 //
 // Thylacine's SVC ABI is Linux-arm64-shaped: syscall number in R8 (x8),
 // arguments in R0..R5 (x0..x5), return value in R0 (x0). Errno is returned
-// as a negative value in [-4095, -2]. There is no vDSO; clock reads go
-// straight through the kernel.
+// as a negative value in [-4095, -2]. Clock reads use the AT_VDSO_CLOCK page
+// fast-path (read_cntvct below + the page; see os_thylacine.go nanotime1/
+// walltime) with a clock_gettime syscall fallback.
 //
 // Three mechanisms diverge from the Linux base and are handled in
 // os_thylacine.go / mem_thylacine.go, not here:
