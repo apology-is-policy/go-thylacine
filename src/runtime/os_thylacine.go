@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"internal/abi"
+	"internal/goarch"
 	"internal/runtime/atomic"
 	"unsafe"
 )
@@ -66,20 +67,29 @@ func thread_entry()
 
 // --- futex on torpor (the second hard divergence) ---
 //
-// torpor_wait(addr, expected, timeout_us): if *addr == expected, sleep up to
-// timeout_us microseconds; timeout_us == 0 (and < 0) means "forever". For a
-// BOUNDED Go sleep we must never pass 0 (that would block forever), so a
-// computed-zero microsecond count is clamped up to 1.
+// torpor_wait(addr, expected, timeout_us): if *addr == expected, register and
+// sleep. The kernel's timeout_us convention (kernel/torpor.c
+// sys_torpor_wait_for_proc) is:
+//     < 0  : block indefinitely (no deadline)  -- Go's "sleep forever".
+//     == 0 : probe; register, recheck, return at ONCE (no real sleep).
+//     > 0  : block at most timeout_us microseconds.
+// So "forever" is a NEGATIVE timeout, NOT 0. A prior version passed 0 for the
+// ns<0 case believing 0 meant forever; the kernel read it as "return at once",
+// so every idle M re-parked in a tight loop -- ~5M futex syscalls/sec, all cores
+// pinned, the go-build wall time. (#343: a `go tool compile` of a 2-line file
+// burned ~300s in 982M torpor_wait calls; the fix is the single -1 below.)
+// For a BOUNDED Go sleep a computed-zero microsecond count is clamped up to 1 so
+// it stays a real >0 sleep rather than the 0-microsecond immediate-return probe.
 
 //go:nosplit
 func futexsleep(addr *uint32, val uint32, ns int64) {
 	if ns < 0 {
-		torpor_wait(unsafe.Pointer(addr), val, 0) // forever
+		torpor_wait(unsafe.Pointer(addr), val, -1) // forever (kernel: <0 = indefinite)
 		return
 	}
 	us := ns / 1000
 	if us == 0 {
-		us = 1 // 0 microseconds would mean "forever" to the kernel
+		us = 1 // a 0-us count is the kernel's immediate-return probe, not a sleep
 	}
 	torpor_wait(unsafe.Pointer(addr), val, us)
 }
@@ -110,7 +120,7 @@ func osyield_no_g() {
 func usleep(us uint32) {
 	u := int64(us)
 	if u == 0 {
-		u = 1 // 0 would mean "forever" to the kernel
+		u = 1 // a 0-us count is the kernel's immediate-return probe, not a sleep
 	}
 	// *sleepDummy == 0 == 0, so this parks for up to u microseconds (no waker).
 	torpor_wait(unsafe.Pointer(&sleepDummy), 0, u)
@@ -122,9 +132,59 @@ func usleep_no_g(us uint32) {
 }
 
 // --- time ---
+//
+// The Thylacine kernel maps a read-only timekeeping page (the vDSO) into every
+// Proc and delivers its address in the AT_VDSO_CLOCK auxv entry (captured in
+// sysargs below). Reading CNTVCT_EL0 + that page computes CLOCK_MONOTONIC /
+// CLOCK_REALTIME with NO syscall -- the lever that kills the scheduler's ~740M
+// SYS_CLOCK_GETTIME nanotime() churn (Thylacine #343). When the page is absent
+// (an older kernel, or an OOM at exec), every read falls back to the syscall.
+// See docs/VDSO-DESIGN.md in the Thylacine tree.
+
+const (
+	_AT_NULL       = 0
+	_AT_VDSO_CLOCK = 0x5654
+	vdsoClockMagic = 0x5644534f4c4b3031 // "VDSOLK01"
+	vdsoClockVers  = 1
+	nsPerSec       = 1000000000
+)
+
+// vdsoClock mirrors struct vdso_clock (kernel/include/thylacine/vdso.h). The
+// reader treats it as read-only; the kernel updates wallOffsetNs with a single
+// aligned-u64 atomic store on SYS_CLOCK_SETTIME (old-or-new, never torn -- no
+// seqlock), so an atomic.Load64 of that field suffices.
+type vdsoClock struct {
+	magic        uint64
+	version      uint64
+	freq         uint64
+	wallOffsetNs uint64
+	_            [4]uint64
+}
+
+// vdsoClockBase is the validated page pointer, or nil to fall back to the
+// syscall. Set once in sysargs at startup; read-only thereafter.
+var vdsoClockBase *vdsoClock
+
+// read_cntvct returns the architectural virtual counter (CNTVCT_EL0), EL0-
+// enabled by the kernel. sys_thylacine_arm64.s.
+//
+//go:noescape
+func read_cntvct() uint64
+
+// monoFromCnt replicates the kernel's timer_now_ns() split form exactly (so the
+// vDSO value is bit-identical to what SYS_CLOCK_GETTIME would return): the
+// quotient/remainder split avoids the cnt*1e9 u64 overflow.
+//
+//go:nosplit
+func monoFromCnt(cnt, freq uint64) uint64 {
+	return (cnt/freq)*nsPerSec + (cnt%freq)*nsPerSec/freq
+}
 
 //go:nosplit
 func nanotime1() int64 {
+	if pg := vdsoClockBase; pg != nil {
+		return int64(monoFromCnt(read_cntvct(), pg.freq))
+	}
 	var ts timespec
 	clock_gettime(_CLOCK_MONOTONIC, &ts)
 	return ts.tv_sec*1e9 + ts.tv_nsec
@@ -132,9 +192,37 @@ func nanotime1() int64 {
 
 //go:nosplit
 func walltime() (sec int64, nsec int32) {
+	if pg := vdsoClockBase; pg != nil {
+		real := monoFromCnt(read_cntvct(), pg.freq) + atomic.Load64(&pg.wallOffsetNs)
+		return int64(real / nsPerSec), int32(real % nsPerSec)
+	}
 	var ts timespec
 	clock_gettime(_CLOCK_REALTIME, &ts)
 	return ts.tv_sec, int32(ts.tv_nsec)
+}
+
+// sysargs walks the auxv (after argv + envp on the initial stack) for
+// AT_VDSO_CLOCK and, if the page validates, caches its pointer. Thylacine has no
+// other auxv consumer (startup entropy comes from getrandom, not AT_RANDOM), so
+// this is the whole auxv-parse path; auxv_none.go's no-op sysargs is excluded
+// for thylacine.
+func sysargs(argc int32, argv **byte) {
+	n := argc + 1
+	// skip over argv to the envp NULL terminator
+	for argv_index(argv, n) != nil {
+		n++
+	}
+	n++ // skip the NULL separator; argv+n is now the auxv
+	auxvp := (*[1 << 28]uintptr)(add(unsafe.Pointer(argv), uintptr(n)*goarch.PtrSize))
+	for i := 0; auxvp[i] != _AT_NULL; i += 2 {
+		if auxvp[i] == _AT_VDSO_CLOCK {
+			pg := (*vdsoClock)(unsafe.Pointer(auxvp[i+1]))
+			if pg.magic == vdsoClockMagic && pg.version == vdsoClockVers && pg.freq != 0 {
+				vdsoClockBase = pg
+			}
+			return
+		}
+	}
 }
 
 // --- init ---

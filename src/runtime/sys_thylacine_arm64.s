@@ -129,6 +129,17 @@ TEXT runtime·clock_gettime(SB),NOSPLIT|NOFRAME,$0-16
 	SVC
 	RET
 
+// func read_cntvct() uint64
+// The architectural virtual counter, EL0-enabled by the kernel (CNTKCTL_EL1.
+// EL0VCTEN). The vDSO clock fast-path (os_thylacine.go) reads this + the kernel
+// timekeeping page to compute the clock with NO syscall. No ISB: CNTVCT is
+// architecturally monotonic, so a few-cycle speculative skew stays monotonic
+// (matches the FreeBSD getCntxct precedent).
+TEXT runtime·read_cntvct(SB),NOSPLIT|NOFRAME,$0-8
+	MRS	CNTVCT_EL0, R0
+	MOVD	R0, ret+0(FP)
+	RET
+
 // func torpor_wait(addr unsafe.Pointer, val uint32, us int64) int32
 // Atomically: if *addr == val, sleep up to us microseconds (us == 0 means
 // forever, per the kernel). If *addr != val, return immediately.
