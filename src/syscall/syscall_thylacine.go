@@ -223,6 +223,12 @@ func Write(fd int, p []byte) (n int, err error) {
 // concurrent cursor move; its cursor-restore bug was #36 layer 2.) Short
 // reads/writes are normal (the kernel caps one call at rwMax); os.File
 // ReadAt/WriteAt loop.
+//
+// The len==0 early return (required: &p[0] panics on an empty slice) skips
+// the trap, so a zero-length Pread on a non-seekable fd returns (0, nil)
+// where the kernel -- and Linux -- would report the ESPIPE-shaped reject.
+// Unreachable via os.File (ReadAt/WriteAt never issue empty ops); a known,
+// deliberate divergence (#37 audit F2).
 func Pread(fd int, p []byte, offset int64) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
