@@ -183,13 +183,28 @@ func (f *File) Stat() (FileInfo, error) {
 	return fileInfoFromStat(&st, f.name), nil
 }
 
-// Truncate has no v1.0 kernel surface (no ftruncate); O_TRUNC at open is the
-// only truncation path.
+// Truncate routes to the syscall layer, which honors the NO-OP case
+// (size == the file's current size, checked via fstat) and returns honest
+// ENOSYS for a real truncation (T_WSTAT_SIZE is the owed kernel lift).
+// The no-op case is load-bearing: cmd/go's putIndexEntry Truncates every
+// cache index entry to its own just-written size (#36 layer 3). This
+// wrapper previously short-circuited ENOSYS WITHOUT consulting the
+// syscall layer, so the layer-3 fix there was dead code and every put on
+// an on-device go build kept self-deleting its index entry (#34 caught
+// it: the gofmt warm build recompiled all 33 non-seed packages every
+// time).
 func (f *File) Truncate(size int64) error {
 	if f == nil {
 		return ErrInvalid
 	}
-	return &PathError{Op: "truncate", Path: f.name, Err: syscall.ENOSYS}
+	if err := f.incref("truncate"); err != nil {
+		return err
+	}
+	defer f.decref()
+	if e := syscall.Ftruncate(f.sysfd, size); e != nil {
+		return &PathError{Op: "truncate", Path: f.name, Err: e}
+	}
+	return nil
 }
 
 func (f *File) chmod(mode FileMode) error {
@@ -298,9 +313,16 @@ func (f *File) seek(offset int64, whence int) (ret int64, err error) {
 	return syscall.Seek(f.sysfd, offset, whence)
 }
 
-// Truncate of a named file: no v1.0 kernel surface.
+// Truncate of a named file: open + the fd-level Truncate (which honors
+// the no-op case via fstat; a real truncation is honest ENOSYS until the
+// T_WSTAT_SIZE kernel lift).
 func Truncate(name string, size int64) error {
-	return &PathError{Op: "truncate", Path: name, Err: syscall.ENOSYS}
+	f, err := OpenFile(name, O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Truncate(size)
 }
 
 // Remove removes the named file or directory. Like the Unix os.Remove, it
