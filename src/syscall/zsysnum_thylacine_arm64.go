@@ -51,6 +51,8 @@ const (
 	SYS_CLOCK_GETTIME      = 75
 	SYS_BURROW_ATTACH_LAZY = 83
 	SYS_BURROW_DECOMMIT    = 84
+	SYS_PREAD              = 85
+	SYS_PWRITE             = 86
 )
 
 // SYS_WALK_OPEN_FROM_ROOT is the start_fd sentinel that resolves a path

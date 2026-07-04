@@ -215,44 +215,44 @@ func Write(fd int, p []byte) (n int, err error) {
 	return int(r1), nil
 }
 
-// Pread / Pwrite are emulated with Seek+Read/Write (Thylacine has no
-// positioned-IO syscall yet -- #37 adds SYS_PREAD/SYS_PWRITE). The emulation
-// SAVES AND RESTORES the fd cursor: POSIX pread/pwrite do not move the file
-// offset, and real readers depend on that -- cmd/go's buildid.ReadFile does
-// ReadAt(buf, 0) then SEQUENTIAL reads, so a cursor left at 8 shifted the
-// archive parse by one line, silently returned an empty build ID for every
-// cache hit, and cascaded action-ID divergence across every dependent
-// package (#36 layer 2: the GOCACHE miss). Still not atomic against a
-// CONCURRENT cursor move on the same fd -- callers that need that must
-// serialize until #37 lands the real syscalls.
+// Pread / Pwrite map 1:1 onto SYS_PREAD/SYS_PWRITE (#37): the kernel passes
+// the caller's offset straight to the Dev and never reads or advances the fd
+// cursor, so concurrent positioned ops on one fd share no mutable state --
+// the POSIX contract io.ReaderAt's parallel-use guarantee rides on. (The
+// pre-#37 Seek+Read/Write emulation was inherently non-atomic against a
+// concurrent cursor move; its cursor-restore bug was #36 layer 2.) Short
+// reads/writes are normal (the kernel caps one call at rwMax); os.File
+// ReadAt/WriteAt loop.
 func Pread(fd int, p []byte, offset int64) (n int, err error) {
-	cur, err := Seek(fd, 0, SEEK_CUR)
-	if err != nil {
-		return 0, err
+	if len(p) == 0 {
+		return 0, nil
 	}
-	if _, err = Seek(fd, offset, SEEK_SET); err != nil {
-		return 0, err
+	want := len(p)
+	if want > rwMax {
+		want = rwMax
 	}
-	n, err = Read(fd, p)
-	if _, e := Seek(fd, cur, SEEK_SET); e != nil && err == nil {
-		err = e
+	r1, _, e := Syscall6(SYS_PREAD, uintptr(fd), uintptr(unsafe.Pointer(&p[0])), uintptr(want), uintptr(offset), 0, 0)
+	runtime.KeepAlive(p)
+	if e != 0 {
+		return 0, e
 	}
-	return n, err
+	return int(r1), nil
 }
 
 func Pwrite(fd int, p []byte, offset int64) (n int, err error) {
-	cur, err := Seek(fd, 0, SEEK_CUR)
-	if err != nil {
-		return 0, err
+	if len(p) == 0 {
+		return 0, nil
 	}
-	if _, err = Seek(fd, offset, SEEK_SET); err != nil {
-		return 0, err
+	want := len(p)
+	if want > rwMax {
+		want = rwMax
 	}
-	n, err = Write(fd, p)
-	if _, e := Seek(fd, cur, SEEK_SET); e != nil && err == nil {
-		err = e
+	r1, _, e := Syscall6(SYS_PWRITE, uintptr(fd), uintptr(unsafe.Pointer(&p[0])), uintptr(want), uintptr(offset), 0, 0)
+	runtime.KeepAlive(p)
+	if e != 0 {
+		return 0, e
 	}
-	return n, err
+	return int(r1), nil
 }
 
 func Seek(fd int, offset int64, whence int) (off int64, err error) {
