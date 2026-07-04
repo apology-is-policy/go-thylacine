@@ -200,6 +200,9 @@ type Entry struct {
 // get is Get but does not respect verify mode, so that Put can use it.
 func (c *DiskCache) get(id ActionID) (Entry, error) {
 	missing := func(reason error) (Entry, error) {
+		if debugHash {
+			fmt.Fprintf(os.Stderr, "CACHEMISS[%x]: %v\n", id, reason)
+		}
 		return Entry{}, &entryNotFoundError{Err: reason}
 	}
 	f, err := os.Open(c.fileName(id, "a"))
@@ -493,6 +496,9 @@ func (c *DiskCache) putIndexEntry(id ActionID, out OutputID, size int64, allowVe
 	if err != nil {
 		// TODO(bcmills): This Remove potentially races with another go command writing to file.
 		// Can we eliminate it?
+		if debugHash {
+			fmt.Fprintf(os.Stderr, "CACHEPUTFAIL[%x]: %v\n", id, err)
+		}
 		os.Remove(file)
 		return err
 	}

@@ -216,20 +216,43 @@ func Write(fd int, p []byte) (n int, err error) {
 }
 
 // Pread / Pwrite are emulated with Seek+Read/Write (Thylacine has no
-// positioned-IO syscall). Not atomic against a concurrent cursor move on the
-// same fd -- callers that need atomicity must serialize.
+// positioned-IO syscall yet -- #37 adds SYS_PREAD/SYS_PWRITE). The emulation
+// SAVES AND RESTORES the fd cursor: POSIX pread/pwrite do not move the file
+// offset, and real readers depend on that -- cmd/go's buildid.ReadFile does
+// ReadAt(buf, 0) then SEQUENTIAL reads, so a cursor left at 8 shifted the
+// archive parse by one line, silently returned an empty build ID for every
+// cache hit, and cascaded action-ID divergence across every dependent
+// package (#36 layer 2: the GOCACHE miss). Still not atomic against a
+// CONCURRENT cursor move on the same fd -- callers that need that must
+// serialize until #37 lands the real syscalls.
 func Pread(fd int, p []byte, offset int64) (n int, err error) {
+	cur, err := Seek(fd, 0, SEEK_CUR)
+	if err != nil {
+		return 0, err
+	}
 	if _, err = Seek(fd, offset, SEEK_SET); err != nil {
 		return 0, err
 	}
-	return Read(fd, p)
+	n, err = Read(fd, p)
+	if _, e := Seek(fd, cur, SEEK_SET); e != nil && err == nil {
+		err = e
+	}
+	return n, err
 }
 
 func Pwrite(fd int, p []byte, offset int64) (n int, err error) {
+	cur, err := Seek(fd, 0, SEEK_CUR)
+	if err != nil {
+		return 0, err
+	}
 	if _, err = Seek(fd, offset, SEEK_SET); err != nil {
 		return 0, err
 	}
-	return Write(fd, p)
+	n, err = Write(fd, p)
+	if _, e := Seek(fd, cur, SEEK_SET); e != nil && err == nil {
+		err = e
+	}
+	return n, err
 }
 
 func Seek(fd int, offset int64, whence int) (off int64, err error) {
@@ -479,8 +502,26 @@ func Rmdir(path string) error {
 
 // Truncate / Ftruncate / Fchmod / Chmod have no v1.0 kernel surface beyond
 // O_TRUNC-at-open and SYS_WSTAT(mode); they are best-effort / unsupported.
-func Truncate(path string, length int64) error  { return ENOSYS }
-func Ftruncate(fd int, length int64) error       { return ENOSYS }
+func Truncate(path string, length int64) error { return ENOSYS }
+
+// Ftruncate has no kernel surface yet (a T_WSTAT_SIZE setattr is the owed
+// v1.0 lift), but "truncate to the size the file already is" is a genuine
+// no-op whose contract we CAN honor via fstat -- and it is the load-bearing
+// case: cmd/go's cache putIndexEntry writes an exact-size entry then calls
+// Truncate(len) as a defensive no-op, and an ENOSYS there sent the error
+// path through os.Remove, deleting every just-written cache entry (#36
+// layer 3: device-written GOCACHE entries never persisted). A REAL
+// truncation (size != length) still fails ENOSYS -- honest, not silent.
+func Ftruncate(fd int, length int64) error {
+	var st Stat_t
+	if err := Fstat(fd, &st); err != nil {
+		return err
+	}
+	if int64(st.Size) == length {
+		return nil
+	}
+	return ENOSYS
+}
 func Fchmod(fd int, mode uint32) error            { return wstatMode(fd, mode) }
 func Chmod(path string, mode uint32) error {
 	fd, e := openMode(path, SYS_WALK_OPEN_OPATH)
