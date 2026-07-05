@@ -37,6 +37,7 @@
 #define SYS_exit_group		60
 #define SYS_getpid		72
 #define SYS_clock_gettime	75
+#define SYS_yield		87
 
 // func exit(code int32)
 TEXT runtime·exit(SB),NOSPLIT|NOFRAME,$0-4
@@ -160,6 +161,19 @@ TEXT runtime·torpor_wake(SB),NOSPLIT|NOFRAME,$0-20
 	MOVD	$SYS_torpor_wake, R8
 	SVC
 	MOVW	R0, ret+16(FP)
+	RET
+
+// func osyield()
+// #33: a REAL yield. SYS_YIELD requeues this M behind any runnable peer
+// queued on its CPU and dispatches the peer; with no local competition it
+// returns immediately (the kernel-side fast path). Replaces the pre-#33
+// torpor_wait(&sleepDummy, 1, 1) mismatch-return, which was a scheduling
+// point in name only -- it never actually gave up the CPU, degrading the
+// spinbit-mutex passive tier and every runtime spin loop (36.8M calls per
+// go build). The linux SYS_sched_yield shape.
+TEXT runtime·osyield(SB),NOSPLIT|NOFRAME,$0
+	MOVD	$SYS_yield, R8
+	SVC
 	RET
 
 // func getrandom(p unsafe.Pointer, n uintptr, flags uint32) int32

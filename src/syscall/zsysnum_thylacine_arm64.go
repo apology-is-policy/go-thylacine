@@ -53,6 +53,7 @@ const (
 	SYS_BURROW_DECOMMIT    = 84
 	SYS_PREAD              = 85
 	SYS_PWRITE             = 86
+	SYS_YIELD              = 87
 )
 
 // SYS_WALK_OPEN_FROM_ROOT is the start_fd sentinel that resolves a path

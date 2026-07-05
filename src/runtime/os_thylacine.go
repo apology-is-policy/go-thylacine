@@ -99,17 +99,16 @@ func futexwakeup(addr *uint32, cnt uint32) {
 	torpor_wake(unsafe.Pointer(addr), cnt)
 }
 
-// sleepDummy backs osyield and usleep. It is never written or woken, so a
-// matching-value wait always times out and a mismatching-value wait returns
-// at once.
+// sleepDummy backs usleep. It is never written or woken, so a matching-value
+// wait always times out.
 var sleepDummy uint32
 
-//go:nosplit
-func osyield() {
-	// No yield syscall. *sleepDummy == 0 != 1, so this returns immediately
-	// after a syscall round-trip -- a scheduling point, which is the point.
-	torpor_wait(unsafe.Pointer(&sleepDummy), 1, 1)
-}
+// osyield issues SYS_YIELD (#33) -- a real voluntary yield, implemented in
+// sys_thylacine_arm64.s. The kernel requeues this M behind any runnable peer
+// queued on its CPU (and runs the peer), or returns immediately when there
+// is no local competition. Pre-#33 this was a torpor_wait mismatch-return
+// that never actually yielded the CPU.
+func osyield()
 
 //go:nosplit
 func osyield_no_g() {
