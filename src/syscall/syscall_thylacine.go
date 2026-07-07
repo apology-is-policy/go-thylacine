@@ -285,16 +285,23 @@ func Fstat(fd int, st *Stat_t) (err error) {
 	return nil
 }
 
-// Stat opens the path O_PATH (which fstat is permitted on) and reads its
-// metadata.
+// Stat resolves the path and reads its metadata in ONE syscall (POUNCE
+// SYS_STAT = 88): on the disk FS the whole resolution is a single fused
+// Twalkgetattr RPC and no handle/Spoor/fid is ever created -- this call is
+// the hottest metadata operation of a go build (the pre-POUNCE emulation was
+// O_PATH open + Fstat + Close: 3 syscalls, ~13 RPCs on a 4-deep path). The
+// X-search authority is identical to the emulation's (path-X only).
 func Stat(path string, st *Stat_t) (err error) {
-	fd, e := openMode(path, SYS_WALK_OPEN_OPATH)
+	p, e := BytePtrFromString(path)
 	if e != nil {
 		return e
 	}
-	er := Fstat(fd, st)
-	Close(fd)
-	return er
+	_, _, en := Syscall(SYS_STAT, uintptr(unsafe.Pointer(p)), uintptr(len(path)), uintptr(unsafe.Pointer(st)))
+	runtime.KeepAlive(p)
+	if en != 0 {
+		return en
+	}
+	return nil
 }
 
 // Lstat does not differentiate from Stat at v1.0 (no symlinks; G11).
