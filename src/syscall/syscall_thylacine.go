@@ -181,7 +181,11 @@ func Create(path string, mode int, perm uint32) (fd int, err error) {
 	return int(r1), nil
 }
 
-const rwMax = 4096 // SYS_RW_MAX -- userspace loops for larger transfers.
+// SYS_RW_MAX mirror -- the kernel's per-call byte-I/O ceiling (128 KiB since
+// Thylacine CF-3 A; was 4096). One Read/Write moves up to this in a single
+// syscall; the kernel still returns short (the negotiated 9P msize bounds a
+// single RPC's payload), and callers loop -- the POSIX contract is unchanged.
+const rwMax = 128 * 1024
 
 func Read(fd int, p []byte) (n int, err error) {
 	if len(p) == 0 {
@@ -221,8 +225,8 @@ func Write(fd int, p []byte) (n int, err error) {
 // the POSIX contract io.ReaderAt's parallel-use guarantee rides on. (The
 // pre-#37 Seek+Read/Write emulation was inherently non-atomic against a
 // concurrent cursor move; its cursor-restore bug was #36 layer 2.) Short
-// reads/writes are normal (the kernel caps one call at rwMax); os.File
-// ReadAt/WriteAt loop.
+// reads/writes are normal (the kernel caps one call at rwMax, and the 9P
+// transport clamps a single RPC below that); os.File ReadAt/WriteAt loop.
 //
 // The len==0 early return (required: &p[0] panics on an empty slice) skips
 // the trap, so a zero-length Pread on a non-seekable fd returns (0, nil)
@@ -319,13 +323,20 @@ func Fsync(fd int) (err error) {
 // into buf (advancing the same cursor SYS_READ / SYS_LSEEK use). Returns the
 // byte count (0 == end-of-directory). Each entry: qid(13) + offset(8 LE) +
 // type(1) + name_len(2 LE) + name.
+// readdirMax mirrors the kernel's SYS_RW_STACK bound: SYS_READDIR REJECTS
+// (not clamps) buf_len above 4096, and CF-3 A deliberately kept it there
+// when rwMax lifted to 128 KiB -- dirent runs are small and the kernel
+// handler stays on its stack scratch. Clamping here keeps any caller-sized
+// buffer (os uses 8 KiB blocks) working.
+const readdirMax = 4096
+
 func Readdir(fd int, buf []byte) (n int, err error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
 	want := len(buf)
-	if want > rwMax {
-		want = rwMax
+	if want > readdirMax {
+		want = readdirMax
 	}
 	r1, _, e := Syscall(SYS_READDIR, uintptr(fd), uintptr(unsafe.Pointer(&buf[0])), uintptr(want))
 	runtime.KeepAlive(buf)
