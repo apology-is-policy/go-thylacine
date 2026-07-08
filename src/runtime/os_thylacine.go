@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"internal/abi"
+	"internal/cpu"
 	"internal/goarch"
 	"internal/runtime/atomic"
 	"unsafe"
@@ -142,6 +143,7 @@ func usleep_no_g(us uint32) {
 
 const (
 	_AT_NULL       = 0
+	_AT_HWCAP      = 16 // the Linux-compatible arm64 feature word (hwfeat.c)
 	_AT_VDSO_CLOCK = 0x5654
 	vdsoClockMagic = 0x5644534f4c4b3031 // "VDSOLK01"
 	vdsoClockVers  = 1
@@ -201,10 +203,11 @@ func walltime() (sec int64, nsec int32) {
 }
 
 // sysargs walks the auxv (after argv + envp on the initial stack) for
-// AT_VDSO_CLOCK and, if the page validates, caches its pointer. Thylacine has no
-// other auxv consumer (startup entropy comes from getrandom, not AT_RANDOM), so
-// this is the whole auxv-parse path; auxv_none.go's no-op sysargs is excluded
-// for thylacine.
+// AT_VDSO_CLOCK (the timekeeping page) and AT_HWCAP (the Linux-compatible
+// CPU-feature word internal/cpu's hwcapInit consumes — hardware AES/SHA for
+// the crypto packages and the toolchain's cache hashing). Startup entropy
+// still comes from getrandom, not AT_RANDOM. auxv_none.go's no-op sysargs
+// is excluded for thylacine.
 func sysargs(argc int32, argv **byte) {
 	n := argc + 1
 	// skip over argv to the envp NULL terminator
@@ -214,12 +217,14 @@ func sysargs(argc int32, argv **byte) {
 	n++ // skip the NULL separator; argv+n is now the auxv
 	auxvp := (*[1 << 28]uintptr)(add(unsafe.Pointer(argv), uintptr(n)*goarch.PtrSize))
 	for i := 0; auxvp[i] != _AT_NULL; i += 2 {
-		if auxvp[i] == _AT_VDSO_CLOCK {
+		switch auxvp[i] {
+		case _AT_HWCAP:
+			cpu.HWCap = uint(auxvp[i+1])
+		case _AT_VDSO_CLOCK:
 			pg := (*vdsoClock)(unsafe.Pointer(auxvp[i+1]))
 			if pg.magic == vdsoClockMagic && pg.version == vdsoClockVers && pg.freq != 0 {
 				vdsoClockBase = pg
 			}
-			return
 		}
 	}
 }
