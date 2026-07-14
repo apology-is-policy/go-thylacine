@@ -140,7 +140,7 @@ func initConfVal() {
 
 	// The remaining checks are specific to Unix systems.
 	switch runtime.GOOS {
-	case "plan9", "windows", "js", "wasip1":
+	case "plan9", "windows", "js", "wasip1", "thylacine":
 		return
 	}
 
@@ -172,7 +172,10 @@ func goosPrefersCgo() bool {
 	// systems did not support the go resolver.
 	// Keep it this way for better compatibility.
 	// Perhaps we can revisit this some day.
-	case "windows", "plan9":
+	// Thylacine follows plan9: the "cgo" resolver is the cs-based
+	// system lookup (lookup_thylacine.go); the go resolver's
+	// resolv.conf/127.0.0.1:53 model does not apply.
+	case "windows", "plan9", "thylacine":
 		return true
 
 	// Darwin pops up annoying dialog boxes if programs try to
@@ -198,7 +201,7 @@ func (c *conf) mustUseGoResolver(r *Resolver) bool {
 		return true
 	}
 
-	if runtime.GOOS == "plan9" {
+	if runtime.GOOS == "plan9" || runtime.GOOS == "thylacine" {
 		// TODO(bradfitz): for now we only permit use of the PreferGo
 		// implementation when there's a non-nil Resolver with a
 		// non-nil Dialer. This is a sign that the code is trying
@@ -206,6 +209,9 @@ func (c *conf) mustUseGoResolver(r *Resolver) bool {
 		// DNS cache) and they don't want to actually hit the network.
 		// Once we add support for looking the default DNS servers
 		// from plan9, though, then we can relax this.
+		// (Thylacine: identical — the go resolver would default to
+		// 127.0.0.1:53 on the guest's own lo, which nothing serves;
+		// netd's cs/dns is the system resolver.)
 		if r == nil || r.Dial == nil {
 			return false
 		}
@@ -272,7 +278,7 @@ func (c *conf) lookupOrder(r *Resolver, hostname string) (ret hostLookupOrder, d
 
 	// On systems that don't use /etc/resolv.conf or /etc/nsswitch.conf, we are done.
 	switch c.goos {
-	case "windows", "plan9", "android", "ios":
+	case "windows", "plan9", "android", "ios", "thylacine":
 		return fallbackOrder, nil
 	}
 
