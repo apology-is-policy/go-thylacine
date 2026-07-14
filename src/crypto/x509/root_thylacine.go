@@ -11,12 +11,15 @@ import (
 )
 
 // Thylacine has no OS certificate-verification API, so x509 verifies against a
-// PEM root bundle read here. The bundle path is reconciled with the system CA
-// bundle when TLS-for-`go get` lands (Stage 5); SSL_CERT_FILE overrides, per the
-// unix convention. Absent any bundle, an empty (non-nil) pool is returned rather
-// than an error: a local `go build` performs no certificate verification, so it
-// is unaffected, while TLS verification against an empty pool fails closed.
+// PEM root bundle read here. The system bundle is the host-baked Mozilla root
+// set at /etc/ssl/certs/ca-certificates.crt (NET-DESIGN s9; the same bundle the
+// native Rust TLS stack reads) -- the Stage 5 reconciliation. SSL_CERT_FILE
+// overrides, per the unix convention. Absent any bundle, an empty (non-nil)
+// pool is returned rather than an error: a local `go build` performs no
+// certificate verification, so it is unaffected, while TLS verification
+// against an empty pool fails closed.
 var certFiles = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
 	"/lib/tls/ca-bundle.pem",
 	"/etc/ssl/cert.pem",
 }
