@@ -171,6 +171,14 @@ func startProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 		argvDataLen: uint32(len(argvBuf)),
 		argc:        uint32(argc),
 		fdCount:     uint32(len(fds)),
+		// Inherit the parent's capabilities: the kernel computes child caps
+		// as parent & capMask (elevation-only bits are stripped regardless,
+		// I-2), so all-ones == "inherit", matching libthyla-rs Command's
+		// default and unix os/exec semantics. A zero mask would spawn every
+		// child capability-naked -- cmd/go's compile/link children never
+		// noticed, but the first entropy-needing child (module fetch TLS ->
+		// SYS_GETRANDOM, gated on CAP_CSPRNG_READ) failed closed.
+		capMask: ^uint64(0),
 	}
 	// Honor ProcAttr.Dir: chdir the parent to Dir so the spawned child inherits
 	// cwd=Dir, then restore. Serialized by spawnDirMu so concurrent spawns do

@@ -183,16 +183,14 @@ func (f *File) Stat() (FileInfo, error) {
 	return fileInfoFromStat(&st, f.name), nil
 }
 
-// Truncate routes to the syscall layer, which honors the NO-OP case
-// (size == the file's current size, checked via fstat) and returns honest
-// ENOSYS for a real truncation (T_WSTAT_SIZE is the owed kernel lift).
-// The no-op case is load-bearing: cmd/go's putIndexEntry Truncates every
-// cache index entry to its own just-written size (#36 layer 3). This
-// wrapper previously short-circuited ENOSYS WITHOUT consulting the
-// syscall layer, so the layer-3 fix there was dead code and every put on
-// an on-device go build kept self-deleting its index entry (#34 caught
-// it: the gofmt warm build recompiled all 33 non-seed packages every
-// time).
+// Truncate routes to the syscall layer: the Larder-served fstat NO-OP fast
+// path (size == current -- cmd/go's putIndexEntry calls this on every cache
+// write, #36 layer 3), then the real SYS_WSTAT(T_WSTAT_SIZE) truncation
+// (Stage 5; the 9P Tsetattr size axis). This wrapper previously
+// short-circuited ENOSYS WITHOUT consulting the syscall layer, so the
+// layer-3 fix there was dead code and every put on an on-device go build
+// kept self-deleting its index entry (#34 caught it: the gofmt warm build
+// recompiled all 33 non-seed packages every time).
 func (f *File) Truncate(size int64) error {
 	if f == nil {
 		return ErrInvalid
@@ -313,9 +311,9 @@ func (f *File) seek(offset int64, whence int) (ret int64, err error) {
 	return syscall.Seek(f.sysfd, offset, whence)
 }
 
-// Truncate of a named file: open + the fd-level Truncate (which honors
-// the no-op case via fstat; a real truncation is honest ENOSYS until the
-// T_WSTAT_SIZE kernel lift).
+// Truncate of a named file: open O_WRONLY + the fd-level Truncate (the
+// write-open carries the RIGHT_WRITE the kernel's T_WSTAT_SIZE gate
+// demands, and the open-time perm_check is the POSIX W-permission check).
 func Truncate(name string, size int64) error {
 	f, err := OpenFile(name, O_WRONLY, 0)
 	if err != nil {

@@ -524,27 +524,42 @@ func Rmdir(path string) error {
 	return nil
 }
 
-// Truncate / Ftruncate / Fchmod / Chmod have no v1.0 kernel surface beyond
-// O_TRUNC-at-open and SYS_WSTAT(mode); they are best-effort / unsupported.
-func Truncate(path string, length int64) error { return ENOSYS }
-
-// Ftruncate has no kernel surface yet (a T_WSTAT_SIZE setattr is the owed
-// v1.0 lift), but "truncate to the size the file already is" is a genuine
-// no-op whose contract we CAN honor via fstat -- and it is the load-bearing
-// case: cmd/go's cache putIndexEntry writes an exact-size entry then calls
-// Truncate(len) as a defensive no-op, and an ENOSYS there sent the error
-// path through os.Remove, deleting every just-written cache entry (#36
-// layer 3: device-written GOCACHE entries never persisted). A REAL
-// truncation (size != length) still fails ENOSYS -- honest, not silent.
-func Ftruncate(fd int, length int64) error {
-	var st Stat_t
-	if err := Fstat(fd, &st); err != nil {
-		return err
+// Truncate opens the path for writing and truncates via the fd (POSIX
+// truncate(2) requires W permission on the file; the O_WRONLY open enforces
+// it -- the open-time perm_check + the omode-derived RIGHT_WRITE the kernel's
+// T_WSTAT_SIZE gate demands). Stage 5: cmd/go's module cache rewrites its
+// ziphash/lock files through lockedfile, which truncates in place.
+func Truncate(path string, length int64) error {
+	fd, e := openMode(path, omodeOWRITE)
+	if e != nil {
+		return e
 	}
-	if int64(st.Size) == length {
+	err := Ftruncate(fd, length)
+	Close(fd)
+	return err
+}
+
+// Ftruncate = SYS_WSTAT(T_WSTAT_SIZE) -- the 9P Tsetattr size axis (Stage 5;
+// shrink discards, extend zero-fills, Stratum-side stm_fs_truncate). The
+// fstat no-op fast path is kept deliberately: "truncate to the size the file
+// already is" is cmd/go's putIndexEntry defensive call on EVERY cache write,
+// and the fstat is served by the guest Larder attr cache (usually no RPC)
+// while a wstat is always an RPC that also invalidates the cached attr+pages
+// -- the fast path keeps the hot cache-put cheap (#36 layer 3 history: an
+// ENOSYS here once deleted every just-written GOCACHE entry).
+func Ftruncate(fd int, length int64) error {
+	if length < 0 {
+		return EINVAL
+	}
+	var st Stat_t
+	if err := Fstat(fd, &st); err == nil && int64(st.Size) == length {
 		return nil
 	}
-	return ENOSYS
+	_, _, e := Syscall6(SYS_WSTAT, uintptr(fd), tWstatSize, 0, 0, 0, uintptr(length))
+	if e != 0 {
+		return e
+	}
+	return nil
 }
 func Fchmod(fd int, mode uint32) error            { return wstatMode(fd, mode) }
 func Chmod(path string, mode uint32) error {
@@ -557,7 +572,10 @@ func Chmod(path string, mode uint32) error {
 	return er
 }
 
-const tWstatMode = 0x1 // T_WSTAT_MODE (kernel/include/thylacine/syscall.h)
+const (
+	tWstatMode = 0x1 // T_WSTAT_MODE (kernel/include/thylacine/syscall.h)
+	tWstatSize = 0x8 // T_WSTAT_SIZE (== P9_SETATTR_SIZE; ftruncate, Stage 5)
+)
 
 func wstatMode(fd int, mode uint32) error {
 	_, _, e := Syscall6(SYS_WSTAT, uintptr(fd), tWstatMode, uintptr(mode&0o777), 0, 0, 0)
