@@ -13,7 +13,7 @@ import (
 )
 
 // ErrNotFound is the error resulting if a path search failed to find an executable file.
-var ErrNotFound = errors.New("executable file not found in $path")
+var ErrNotFound = errors.New("executable file not found in $PATH")
 
 // findExecutable reports whether file is a runnable program. Thylacine gates
 // execution on namespace X-search + an OEXEC open (the kernel's
@@ -33,10 +33,12 @@ func findExecutable(file string) error {
 
 // LookPath searches for an executable named file. If file begins with "/",
 // "#", "./", or "../", it is tried directly. Otherwise the directories in the
-// "path" environment variable are consulted -- but Thylacine native processes
-// have no environment (G15), so a bare name resolves to nothing here: the
-// shell's $path = /bin handles bare-command resolution, and a Go program that
-// wants to exec a system binary names it absolutely (e.g. "/bin/echo").
+// POSIX "PATH" environment variable are consulted -- the per-Proc /env (G15),
+// which the session seeds (login: PATH=/bin:/goroot/bin) and goenvs reads at
+// startup. The variable is UPPERCASE "PATH" (Thylacine's POSIX-shaped /env),
+// not Plan 9's lowercase "$path": it must match what the session seeds, or a
+// Go program's exec.LookPath (e.g. gopls resolving "go") finds nothing while
+// os.Getenv("PATH") is non-empty.
 //
 // On success the result is an absolute path.
 func LookPath(file string) (string, error) {
@@ -57,7 +59,7 @@ func LookPath(file string) (string, error) {
 		}
 	}
 
-	path := os.Getenv("path")
+	path := os.Getenv("PATH")
 	for _, dir := range filepath.SplitList(path) {
 		path := filepath.Join(dir, file)
 		if err := findExecutable(path); err == nil {
