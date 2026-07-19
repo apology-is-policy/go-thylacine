@@ -8,8 +8,8 @@
 // GOOS: Open and Create are distinct, files are reached by path through the
 // per-Proc namespace, there is no fork), but errors are numeric Errno values
 // (the kernel returns -errno, Linux-style) rather than Plan 9 error strings,
-// and stat is a fixed-layout struct (SYS_FSTAT fills an 80-byte t_stat)
-// rather than a marshaled 9P Dir.
+// and stat is a fixed-layout struct (SYS_FSTAT/SYS_STAT fills an 88-byte
+// t_stat) rather than a marshaled 9P Dir.
 
 package syscall
 
@@ -88,9 +88,12 @@ func NsecToTimeval(nsec int64) Timeval {
 	return Timeval{Sec: nsec / 1e9, Usec: nsec % 1e9 / 1e3}
 }
 
-// Stat_t is the fixed 80-byte SYS_FSTAT record (struct t_stat in
+// Stat_t is the fixed 88-byte SYS_FSTAT/SYS_STAT record (struct t_stat in
 // kernel/include/thylacine/syscall.h). Plan 9 qid identity carried verbatim
-// alongside POSIX-shaped mode/size/time.
+// alongside POSIX-shaped mode/size/time. The kernel writes sizeof(Stat_t)
+// bytes into this struct via unsafe.Pointer, so the Go layout IS the ABI --
+// it must track the kernel t_stat byte-for-byte and grow in lockstep, else a
+// stale (smaller) struct is overrun by the kernel's copy-out.
 type Stat_t struct {
 	Size    uint64 // 0
 	QidPath uint64 // 8
@@ -107,6 +110,8 @@ type Stat_t struct {
 	Blocks  uint64 // 64
 	Uid     uint32 // 72
 	Gid     uint32 // 76
+	Dev     uint32 // 80: #100 per-instance device number (Plan 9 Chan.dev / st_dev)
+	_       uint32 // 84: pad to 88
 }
 
 // --- path / name helpers ---
@@ -561,7 +566,7 @@ func Ftruncate(fd int, length int64) error {
 	}
 	return nil
 }
-func Fchmod(fd int, mode uint32) error            { return wstatMode(fd, mode) }
+func Fchmod(fd int, mode uint32) error { return wstatMode(fd, mode) }
 func Chmod(path string, mode uint32) error {
 	fd, e := openMode(path, SYS_WALK_OPEN_OPATH)
 	if e != nil {

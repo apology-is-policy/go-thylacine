@@ -26,7 +26,9 @@ func (fs *fileStat) ModTime() time.Time { return fs.modTime }
 func (fs *fileStat) Sys() any           { return &fs.sys }
 
 func sameFile(fs1, fs2 *fileStat) bool {
-	// Thylacine carries no Dev id in t_stat; the 9P qid (path+type) is the
-	// per-Dev identity. Cross-Dev collisions are possible but rare at v1.0.
-	return fs1.sys.QidPath == fs2.sys.QidPath && fs1.sys.QidType == fs2.sys.QidType
+	// #100: t_stat now carries Dev (the per-mount/session identity, Plan 9
+	// Chan.dev). Two names are the same file iff they share device AND the 9P
+	// qid (path+type) -- Dev disambiguates a qid.path reused across datasets.
+	return fs1.sys.Dev == fs2.sys.Dev &&
+		fs1.sys.QidPath == fs2.sys.QidPath && fs1.sys.QidType == fs2.sys.QidType
 }
