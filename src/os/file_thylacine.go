@@ -114,6 +114,25 @@ func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 		fd, e = syscall.Open(name, flag)
 		if IsNotExist(e) {
 			fd, e = syscall.Create(name, flag, syscallMode(perm))
+			if IsExist(e) {
+				// Thylacine's open-or-create is two non-atomic syscalls (Open then
+				// Create), unlike Linux's atomic openat(O_CREATE). So a concurrent
+				// creator -- or a stale negative dir cache that made the Open above
+				// miss an existing file -- lands us here with the file already
+				// present: SYS_WALK_CREATE (Tlcreate) is bare-create and returns
+				// EEXIST. Without O_EXCL that is not an error; POSIX opens the
+				// existing file, so retry the Open. (Depends on the kernel surfacing
+				// the real EEXIST rather than a blanket EPERM/EIO -- the #99/#102 fix;
+				// pre-fix the create failure was an opaque EPERM and this never fired.)
+				//
+				// One retry suffices: the #99 kernel fix drops the stale negative
+				// dentry on EEXIST, so this retry-Open sees the file the server just
+				// proved exists (verified 10/10 under an 8-way concurrent race, the
+				// go-fs step-6b SMP gate). A bounded Open/Create loop would be the
+				// fuller POSIX shape only for a genuine create/unlink storm racing
+				// this path -- not a workload v1.0 exercises (#99 F5, documented).
+				fd, e = syscall.Open(name, flag)
+			}
 			if e != nil {
 				return nil, &PathError{Op: "create", Path: name, Err: e}
 			}
